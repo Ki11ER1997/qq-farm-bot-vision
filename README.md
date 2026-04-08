@@ -1,5 +1,5 @@
 # qq-farm-bot-vision
-# QQ经典农场机器人（AI视觉版本）
+# QQ经典农场机器人（gui界面版）
 ## 基于CV视觉匹配的初版已开发完成，Alaph版本已发布，注意：这是早期测试版本，功能不全还在持续开发和优化中，主要是想让部分用户试用一下，协助测试BUG和提意见。
 ## 最新功能更新日志请查看：[update_cv.txt](./update_cv.txt)
 ## 试用过程中遇到问题可提issue：[issue问题区](https://github.com/flh155/qq-farm-bot-vision/issues)
