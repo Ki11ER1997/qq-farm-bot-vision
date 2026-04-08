@@ -9,8 +9,8 @@ from utils.farm_bot_cv import FarmBotCV
 class FarmBotGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("QQ经典农场助手 - V1.0")
-        self.root.geometry("750x550")
+        self.root.title("QQ经典农场助手 - V1.1")
+        self.root.geometry("750x620")
         self.root.minsize(650, 450)
         self.root.resizable(False, False)
         
@@ -30,15 +30,45 @@ class FarmBotGUI:
         
         # 加载配置
         import os
-        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        import sys
+        # 简化配置文件路径处理，直接在根目录寻找config.ini
+        # 首先尝试当前目录（根目录）
+        self.config_path = os.path.join(os.getcwd(), "config.ini")
+        # 如果当前目录没有，尝试在可执行文件所在目录
+        if not os.path.exists(self.config_path) and hasattr(sys, 'executable'):
+            self.config_path = os.path.join(os.path.dirname(sys.executable), "config.ini")
+        # 如果还是没有，尝试在脚本所在目录
+        if not os.path.exists(self.config_path):
+            self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        
         self.config = configparser.ConfigParser(inline_comment_prefixes=('#',))
-        self.config.read(self.config_path, encoding="utf-8")
+        # 读取配置文件
+        read_success = self.config.read(self.config_path, encoding="utf-8")
+        
+        # 如果配置文件读取失败，提示用户
+        if not read_success:
+            print(f"无法读取配置文件: {self.config_path}")
+            print("请确保config.ini文件存在于根目录中")
+            # 退出程序
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()  # 隐藏主窗口
+            messagebox.showerror("错误", f"无法读取配置文件: {self.config_path}\n请确保config.ini文件存在于根目录中")
+            root.destroy()
+            sys.exit(1)
         
         # 初始化机器人
         self.bot = None
         self.bot_thread = None
         self.running = False
         self.status_timer_id = None
+        
+        # 添加防抖计时器
+        import time
+        self.last_pause_time = 0
+        self.last_stop_time = 0
+        self.cooldown = 1.0  # 1秒冷却时间
         
         # 创建界面
         self.create_widgets()
@@ -113,6 +143,22 @@ class FarmBotGUI:
         self.debug_var = tk.BooleanVar(value=self.config.getboolean('bot', 'debug_mode'))
         ttk.Checkbutton(debug_frame, text="调试模式", variable=self.debug_var, style='Custom.TCheckbutton').pack(anchor=tk.W, padx=2)
         
+        # 后台静默点击
+        silence_click_frame = tk.Frame(config_frame, bg=self.colors['surface'])
+        silence_click_frame.pack(fill=tk.X, pady=1)
+        
+        self.silence_click_var = tk.BooleanVar(value=self.config.getboolean('bot', 'enable_silence_click'))
+        ttk.Checkbutton(silence_click_frame, text="后台静默点击", variable=self.silence_click_var, style='Custom.TCheckbutton').pack(anchor=tk.W, padx=2)
+        
+        # 种植检查间隔
+        plant_interval_frame = tk.Frame(config_frame, bg=self.colors['surface'])
+        plant_interval_frame.pack(fill=tk.X, pady=1)
+        
+        tk.Label(plant_interval_frame, text="种植间隔:", width=8, bg=self.colors['surface'], fg=self.colors['text'], font=self.fonts['body']).pack(side=tk.LEFT, padx=2)
+        self.plant_interval_var = tk.StringVar(value=self.config.get('self', 'plant_seed_check_interval'))
+        ttk.Entry(plant_interval_frame, textvariable=self.plant_interval_var, style='Custom.TEntry', width=8).pack(side=tk.LEFT, padx=2)
+        tk.Label(plant_interval_frame, text="秒", bg=self.colors['surface'], fg=self.colors['text_secondary'], font=self.fonts['body']).pack(side=tk.LEFT, padx=2)
+        
         # 保存配置按钮
         ttk.Button(config_frame, text="保存配置", command=self.save_config, style='Default.TButton').pack(fill=tk.X, pady=2)
         
@@ -156,6 +202,9 @@ class FarmBotGUI:
         
         self.enable_daily_free_var = tk.BooleanVar(value=self.config.getboolean('self', 'enable_daily_free'))
         ttk.Checkbutton(self.self_farm_frame, text="领取每日礼包", variable=self.enable_daily_free_var, style='Custom.TCheckbutton').pack(anchor=tk.W, pady=1, padx=15)
+        
+        self.enable_plant_seed_var = tk.BooleanVar(value=self.config.getboolean('self', 'enable_plant_seed'))
+        ttk.Checkbutton(self.self_farm_frame, text="自动种植", variable=self.enable_plant_seed_var, style='Custom.TCheckbutton').pack(anchor=tk.W, pady=1, padx=15)
         
         # 好友农场功能框架
         self.friend_farm_frame = tk.Frame(self.content_frame, bg=self.colors['surface'])
@@ -227,7 +276,9 @@ class FarmBotGUI:
             'close_x_small_frame': '好友关闭按钮阈值',
             'shop_red_frame': '商店红点阈值',
             'daily_free_frame': '每日免费礼包阈值',
-            'return_farm_frame': '返回农场阈值'
+            'return_farm_frame': '返回农场阈值',
+            'dog_house_frame': '狗屋图标阈值',
+            'remove_seed_frame': '移除种子阈值'
         }
         
         row = 0
@@ -370,12 +421,15 @@ class FarmBotGUI:
                         self.config.set('bot', 'debug_mode', str(self.debug_var.get()))
                         self.config.set('bot', 'enable_process_self', str(self.enable_self_var.get()))
                         self.config.set('bot', 'enable_process_friend', str(self.enable_friend_var.get()))
+                        self.config.set('bot', 'enable_silence_click', str(self.silence_click_var.get()))
                         
                         self.config.set('self', 'enable_harvest', str(self.enable_harvest_var.get()))
                         self.config.set('self', 'enable_watering', str(self.enable_watering_var.get()))
                         self.config.set('self', 'enable_remove_grass', str(self.enable_remove_grass_var.get()))
                         self.config.set('self', 'enable_remove_bug', str(self.enable_remove_bug_var.get()))
                         self.config.set('self', 'enable_daily_free', str(self.enable_daily_free_var.get()))
+                        self.config.set('self', 'enable_plant_seed', str(self.enable_plant_seed_var.get()))
+                        self.config.set('self', 'plant_seed_check_interval', self.plant_interval_var.get())
                         
                         self.config.set('friend', 'enable_steal', str(self.enable_steal_var.get()))
                         self.config.set('friend', 'enable_help_watering', str(self.enable_help_watering_var.get()))
@@ -441,6 +495,12 @@ class FarmBotGUI:
         threading.Thread(target=start_bot_async, daemon=True).start()
     
     def pause_bot(self, event=None):
+        import time
+        # 添加防抖机制
+        current_time = time.time()
+        if current_time - self.last_pause_time < self.cooldown:
+            return
+        
         if self.bot:
             self.bot.pause()
             if self.bot.pause_status:
@@ -451,8 +511,15 @@ class FarmBotGUI:
                 self.status_var.set("运行中")
                 self.update_status_color()
                 self.pause_button.config(text="暂停")
+            self.last_pause_time = current_time
     
     def stop_bot(self, event=None):
+        import time
+        # 添加防抖机制
+        current_time = time.time()
+        if current_time - self.last_stop_time < self.cooldown:
+            return
+        
         def stop_bot_async():
             if self.bot:
                 # 停止机器人
@@ -483,6 +550,7 @@ class FarmBotGUI:
         
         # 在后台线程中停止机器人
         threading.Thread(target=stop_bot_async, daemon=True).start()
+        self.last_stop_time = current_time
     
     def save_config(self):
         try:
@@ -492,12 +560,15 @@ class FarmBotGUI:
             self.config.set('bot', 'debug_mode', str(self.debug_var.get()))
             self.config.set('bot', 'enable_process_self', str(self.enable_self_var.get()))
             self.config.set('bot', 'enable_process_friend', str(self.enable_friend_var.get()))
+            self.config.set('bot', 'enable_silence_click', str(self.silence_click_var.get()))
             
             self.config.set('self', 'enable_harvest', str(self.enable_harvest_var.get()))
             self.config.set('self', 'enable_watering', str(self.enable_watering_var.get()))
             self.config.set('self', 'enable_remove_grass', str(self.enable_remove_grass_var.get()))
             self.config.set('self', 'enable_remove_bug', str(self.enable_remove_bug_var.get()))
             self.config.set('self', 'enable_daily_free', str(self.enable_daily_free_var.get()))
+            self.config.set('self', 'enable_plant_seed', str(self.enable_plant_seed_var.get()))
+            self.config.set('self', 'plant_seed_check_interval', self.plant_interval_var.get())
             
             self.config.set('friend', 'enable_steal', str(self.enable_steal_var.get()))
             self.config.set('friend', 'enable_help_watering', str(self.enable_help_watering_var.get()))
@@ -552,25 +623,20 @@ class FarmBotGUI:
         # 添加防抖机制，避免多次触发
         import time
         import threading
-        last_pause_time = 0
-        last_stop_time = 0
-        cooldown = 1.0  # 1秒冷却时间，确保足够长以避免重复触发
         
         def on_global_pause():
-            nonlocal last_pause_time
             current_time = time.time()
-            if current_time - last_pause_time > cooldown:
-                print("全局快捷键 Ctrl+P 被触发")
-                self.pause_bot()
-                last_pause_time = current_time
+            if current_time - self.last_pause_time < self.cooldown:
+                return
+            print("全局快捷键 Ctrl+P 被触发")
+            self.pause_bot()
         
         def on_global_stop():
-            nonlocal last_stop_time
             current_time = time.time()
-            if current_time - last_stop_time > cooldown:
-                print("全局快捷键 Ctrl+S 被触发")
-                self.stop_bot()
-                last_stop_time = current_time
+            if current_time - self.last_stop_time < self.cooldown:
+                return
+            print("全局快捷键 Ctrl+S 被触发")
+            self.stop_bot()
         
         def keyboard_listener():
             """键盘监听线程，确保全局快捷键在打包后也能正常工作"""
