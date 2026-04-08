@@ -1,12 +1,14 @@
+from ast import Break
 import cv2
+import keyboard
 import time
 import pyautogui
 import logging
 import configparser
 import random
-import threading
 from utils.cv_match import cvMatch
 from utils.screen_capture import ScreenCapture
+from utils.window_control import WindowControl
 
 
 class FarmBotCV:
@@ -30,6 +32,7 @@ class FarmBotCV:
         self.enable_process_self = config.getboolean('bot', 'enable_process_self')
         self.enable_process_friend = config.getboolean('bot', 'enable_process_friend')
         self.friend_colddown_time = config.getint('bot', 'friend_colddown_time')
+        self.enable_silence_click = config.getboolean('bot', 'enable_silence_click')
 
         # 获取自己农场的功能配置
         self.enable_harvest = config.getboolean('self', 'enable_harvest')
@@ -37,6 +40,8 @@ class FarmBotCV:
         self.enable_remove_grass = config.getboolean('self', 'enable_remove_grass')
         self.enable_watering = config.getboolean('self', 'enable_watering')
         self.enable_daily_free = config.getboolean('self', 'enable_daily_free')
+        self.enable_plant_seed = config.getboolean('self', 'enable_plant_seed')
+        self.plant_seed_check_interval = config.getint('self', 'plant_seed_check_interval')
 
         # 获取好友农场任务的功能配置
         self.enable_steal = config.getboolean('friend', 'enable_steal')
@@ -70,6 +75,8 @@ class FarmBotCV:
         self.shop_red_frame_threshold = config.getfloat('threshold', 'shop_red_frame')
         self.daily_free_frame_threshold = config.getfloat('threshold', 'daily_free_frame')
         self.return_farm_frame_threshold = config.getfloat('threshold', 'return_farm_frame')
+        self.dog_house_frame_threshold = config.getfloat('threshold', 'dog_house_frame')
+        self.remove_seed_frame_threshold = config.getfloat('threshold', 'remove_seed_frame')
 
 
 
@@ -78,94 +85,111 @@ class FarmBotCV:
         self.pause_status = False
         self.now_scene = "home"     # 判断当前所在的场景
         self.screen_capture = ScreenCapture("QQ经典农场")
+        if self.enable_silence_click:
+            self.window_control = WindowControl("QQ经典农场")
+        else:
+            self.window_control = None
         self.cv_match = cvMatch()
         self.is_friend_has_task = True
-        self.start_friend_check_colddown_time = None
-        
-        # 添加线程锁
-        self._pause_lock = threading.Lock()
-        
-        # 添加防抖计时器
-        self.last_pause_time = 0
-        self.last_stop_time = 0
-        self.cooldown = 1.0  # 1秒冷却时间
+        self.start_friend_check_colddown_time = 0
+        self.game_frame_w = None
+        self.game_frame_h = None
+        self.is_today_check_daily_free = False
+        self.last_check_plant_time = 0
+
+        # 处理PyInstaller单文件模式的路径问题
+        import os
+        import sys
+        if hasattr(sys, '_MEIPASS'):
+            # 在单文件模式下
+            self.assert_path = os.path.join(sys._MEIPASS, "assert")
+        else:
+            # 在开发环境下
+            self.assert_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assert")
 
         # 加载匹配图片资源
-        self.welcome_back_frame = cv2.imread(r"assert\datasets\icons\welcome_back.jpg")
-        self.harvest_all_frame = cv2.imread(r"assert\datasets\icons\harvest_all.jpg")
-        self.harvest_one_frame = cv2.imread(r"assert\datasets\icons\harvest_one.jpg")
-        self.get_new_seed_frame = cv2.imread(r"assert\datasets\icons\get_new_seed.jpg")
-        self.level_up_frame = cv2.imread(r"assert\datasets\icons\level_up.jpg")
-        self.watering_all_frame = cv2.imread(r"assert\datasets\icons\watering_all.jpg")
-        self.remove_all_grass_frame = cv2.imread(r"assert\datasets\icons\remove_all_grass.jpg")
-        self.remove_all_bugs_frame = cv2.imread(r"assert\datasets\icons\remove_all_bugs.jpg")
-        self.reconnect_frame = cv2.imread(r"assert\datasets\icons\reconnect.jpg")
-        self.friend_icon_frame = cv2.imread(r"assert\datasets\icons\friend_red.jpg")
-        self.can_steal_frame = cv2.imread(r"assert\datasets\icons\can_steal.jpg")
-        self.steal_all_frame = cv2.imread(r"assert\datasets\icons\steal_all.jpg")
-        self.go_home_frame = cv2.imread(r"assert\datasets\icons\go_home.jpg")
-        self.close_x_frame = cv2.imread(r"assert\datasets\icons\close_x.jpg")
-        self.help_remove_bugs = cv2.imread(r"assert\datasets\icons\help_remove_bugs.jpg")
-        self.help_remove_grass = cv2.imread(r"assert\datasets\icons\help_remove_grass.jpg")
-        self.help_watering = cv2.imread(r"assert\datasets\icons\help_watering.jpg")
-        self.can_steal_small_frame = cv2.imread(r"assert\datasets\icons\can_steal_small.jpg")
-        self.can_watering_small_frame = cv2.imread(r"assert\datasets\icons\can_watering_small.jpg")
-        self.can_remove_bugs_small_frame = cv2.imread(r"assert\datasets\icons\can_remove_bugs.jpg")
-        self.can_remove_grass_small_frame = cv2.imread(r"assert\datasets\icons\can_remove_bugs.jpg")
-        self.close_x_small_frame = cv2.imread(r"assert\datasets\icons\close_x_small.jpg")
-        self.shop_red_frame = cv2.imread(r"assert\datasets\icons\shop_red.jpg")
-        self.daily_free_frame = cv2.imread(r"assert\datasets\icons\daily_free.jpg")
-        self.return_farm_frame = cv2.imread(r"assert\datasets\icons\return_farm.jpg")
+        self.welcome_back_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "welcome_back.jpg"))
+        self.harvest_all_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "harvest_all.jpg"))
+        self.harvest_one_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "harvest_one.jpg"))
+        self.get_new_seed_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "get_new_seed.jpg"))
+        self.level_up_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "level_up.jpg"))
+        self.watering_all_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "watering_all.jpg"))
+        self.remove_all_grass_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "remove_all_grass.jpg"))
+        self.remove_all_bugs_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "remove_all_bugs.jpg"))
+        self.reconnect_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "reconnect.jpg"))
+        self.friend_icon_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "friend_red.jpg"))
+        self.can_steal_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "can_steal.jpg"))
+        self.steal_all_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "steal_all.jpg"))
+        self.go_home_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "go_home.jpg"))
+        self.close_x_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "close_x.jpg"))
+        self.help_remove_bugs = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "help_remove_bugs.jpg"))
+        self.help_remove_grass = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "help_remove_grass.jpg"))
+        self.help_watering = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "help_watering.jpg"))
+        self.can_steal_small_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "can_steal_small.jpg"))
+        self.can_watering_small_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "can_watering_small.jpg"))
+        self.can_remove_bugs_small_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "can_remove_bugs.jpg"))
+        self.can_remove_grass_small_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "can_remove_bugs.jpg"))
+        self.close_x_small_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "close_x_small.jpg"))
+        self.shop_red_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "shop_red.jpg"))
+        self.daily_free_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "daily_free.jpg"))
+        self.return_farm_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "return_farm.jpg"))
+        self.dog_house_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "dog_house.jpg"))
+        self.remove_seed_frame = cv2.imread(os.path.join(self.assert_path, "datasets", "icons", "remove_seed.jpg"))
 
-        self.logger.info("机器人初始化完成,准备开始巡检")
+        self.logger.info("机器人初始化完成")
+        if self.enable_silence_click:
+            self.logger.warning("注意：【后台静默点击】功能已被配置启用")
+        if not self.enable_process_friend:
+            self.logger.warning("注意：【处理好友农场】功能已被配置禁用")
+        if not self.enable_process_self:
+            self.logger.warning("注意：【处理自家农场】功能已被配置禁用")
+        if not self.enable_steal:
+            self.logger.warning("注意：【偷菜】功能已被配置禁用")
+        if not self.enable_help_remove_grass:
+            self.logger.warning("注意：【帮助好友除草】功能已被配置禁用")
+        if not self.enable_help_watering:
+            self.logger.warning("注意：【帮助好友浇水】功能已被配置禁用")
+        if not self.enable_remove_bug:
+            self.logger.warning("注意：【帮助好友除虫】功能已被配置禁用")
+        if not self.enable_daily_free:
+            self.logger.warning("注意：【自动领取每日免费礼包】功能已被配置禁用")
+        if not self.enable_plant_seed:
+            self.logger.warning("注意：【自动种植】功能已被配置禁用")
+        self.logger.info(f"【机器人操作间隔】已配置为 {self.check_interval} 秒")
+        self.logger.info(f"【好友巡检间隔】已配置为 {self.friend_colddown_time} 秒")
+        self.logger.info(f"【自动种植检查间隔】已配置为 {self.plant_seed_check_interval} 秒")
         
     def start(self):
+        # 不再在FarmBotCV中注册热键，由GUI统一管理
+
         while self.running:
             # 主循环逻辑
             if not self.pause_status:
                 self.logger.info("======================机器人正在执行一轮操作======================")
                 self.run_cycle()
                 self.logger.info(f"======================本轮操作执行完毕======================\r\n")
+            if self.debug_mode == True:
+                self.logger.debug(f"********Debug模式已开启，按[ctrl+s]键后进入下一轮操作********")
+                keyboard.wait('ctrl+s')
+            else:
+                time.sleep(self.check_interval)
             
-            # 在休眠期间定期检查是否需要停止
-            for i in range(int(self.check_interval * 10)):
-                if not self.running:
-                    break
-                time.sleep(0.1)
-
     def pause(self):
-        # 添加防抖机制
-        current_time = time.time()
-        if current_time - self.last_pause_time < self.cooldown:
-            return
-        
-        # 使用线程锁避免重复触发
-        if self._pause_lock.acquire(blocking=False):
-            try:
-                if not self.pause_status:
-                    self.logger.info("接收到暂停信号，机器人暂时停止处理")
-                    self.pause_status = True
-                else:
-                    self.logger.info("接收到恢复信号，机器人继续处理")
-                    self.pause_status = False
-                self.last_pause_time = current_time
-            finally:
-                # 释放锁
-                self._pause_lock.release()
+        if self.pause_status == False:
+            self.logger.info("接收到暂停信号，机器人暂时停止处理")
+            self.pause_status = True
+        else:
+            self.logger.info("接收到恢复信号，机器人继续处理")
+            self.pause_status = False
 
     def stop(self):
-        # 添加防抖机制
-        current_time = time.time()
-        if current_time - self.last_stop_time < self.cooldown:
-            return
-        
         self.logger.info("接收到停止信号，机器人已停止")
         self.running = False
-        self.last_stop_time = current_time
     
 
     def run_cycle(self):
         # 循环处理事件
+        self.logger.debug(f"now sence:{self.now_scene}")
         if self.screen_capture.check_window_exist():
             self.logger.debug("正在获取游戏画面")
             game_frame = self.screen_capture.get_window_frame()     # 获取游戏画面
@@ -181,14 +205,16 @@ class FarmBotCV:
             if game_frame_w < 400 or game_frame_h < 800:
                 self.logger.error(f"游戏窗口尺寸过小，请调整窗口大小,当前窗口尺寸：{game_frame_w}x{game_frame_h}，至少需满足: 400x800")
                 return
+            self.game_frame_w = game_frame_w
+            self.game_frame_h = game_frame_h
 
             # 验证是否真正回到了自己的农场
             # 检查是否存在好友农场特有的元素（如回家按钮），如果存在但场景被标记为home，则修正场景
             if self.now_scene == "home":
                 # 检查是否仍然在好友农场（存在回家按钮）
                 if self.check_go_home_icon(game_frame):
-                    self.logger.warning("检测到仍在好友农场，修正场景状态")
-                    self.now_scene = "friend_farm"
+                    self.logger.warning("检测到仍在好友农场，已再次点击返回自己农场按钮")
+                    self.now_scene = "home"
 
             # 优先处理自家农场事件
             if self.now_scene == "home":
@@ -293,12 +319,39 @@ class FarmBotCV:
         # 检测每日礼包是否已领取
         if self.enable_daily_free == True:
             if self.now_scene == "home":
-                if self.check_shop_red(game_frame):
-                    if self.check_daily_free(game_frame):
-                        self.check_return_farm(game_frame)
+                current_hour = time.localtime().tm_hour
+                current_min = time.localtime().tm_min
+                current_sec = time.localtime().tm_sec
+                if self.is_today_check_daily_free == False:
+                    self.logger.info("正在尝试领取【每日免费礼包】")
+                    if self.check_shop_red(game_frame):
+                        if self.check_daily_free(game_frame):
+                            self.check_return_farm(game_frame)
+                        return True
+                    self.is_today_check_daily_free = True
                     return True
+                else:
+                    if current_hour == 0 and current_min == 0 and current_sec in [0,1,2,3]:     # 到了每日0点
+                        self.is_today_check_daily_free = False
+                        self.logger.info("已过每日0点，今日免费礼包已刷新")
+                    else:
+                        self.logger.info("今日免费礼包已领取")    
+                    return False   
         else:
             self.logger.info("机器人已被配置为【不检查领取每日免费礼包】")
+            return False
+        
+        # 检测是否需要种植种子
+        if self.enable_plant_seed:
+            current_time = time.time()
+            if current_time - self.last_check_plant_time > self.plant_seed_check_interval:
+                self.last_check_plant_time = current_time
+                for i in range(24):  # 检查24块地
+                    if not self.plant_seed_v1(game_frame, i):
+                        break  # 如果遇到未扩建的地，停止检查
+                return True
+        else:
+            self.logger.info("机器人已被配置为【不执行自动种植】")
         return False
 
     def process_friend_farm(self, game_frame):
@@ -318,18 +371,12 @@ class FarmBotCV:
                     return True
             else:
                 self.logger.info("当前配置不帮助好友浇水")
-            if self.enable_help_remove_bugs == True:
+            if self.enable_help_remove_bugs == True and self.enable_help_remove_grass == True:
                 if self.check_can_remove_bugs_small(game_frame):
                     self.now_scene = "friend_farm"
                     return True
             else:
-                self.logger.info("当前配置不帮助好友除虫")
-            if self.enable_help_remove_grass == True:
-                if self.check_can_remove_grass_small(game_frame):
-                    self.now_scene = "friend_farm"
-                    return True
-            else:
-                self.logger.info("当前配置不帮助好友除草")
+                self.logger.info("当前配置不帮助好友除虫/除草")
             if self.check_close_x_small(game_frame):    # 好友来农场的弹窗需要关掉
                 self.now_scene = "home"
                 return True
@@ -347,13 +394,6 @@ class FarmBotCV:
                     return True 
             else:
                 self.logger.info("当前配置不偷取好友作物")
-            # 检测可以帮忙除草的图标
-            if self.enable_help_remove_grass == True:
-                if self.check_help_remove_grass(game_frame):
-                    self.now_scene = "friend_farm"  # 在好友农场界面
-                    return True
-            else:
-                self.logger.info("当前配置不帮助好友除草")
             # 检测可以帮忙浇水的图标
             if self.enable_help_watering == True:
                 if self.check_help_watering(game_frame):
@@ -361,13 +401,16 @@ class FarmBotCV:
                     return True
             else:
                 self.logger.info("当前配置不帮助好友浇水")
-            # 检测可以帮忙除虫的图标
-            if self.enable_help_remove_bugs == True:
+            # 检测可以帮忙除草和除虫的图标
+            if self.enable_help_remove_grass == True and self.enable_help_remove_bugs == True:
+                if self.check_help_remove_grass(game_frame):
+                    self.now_scene = "friend_farm"  # 在好友农场界面
+                    return True
                 if self.check_help_remove_bugs(game_frame):
                     self.now_scene = "friend_farm"  # 在好友农场界面
                     return True
             else:
-                self.logger.info("当前配置不帮助好友除虫")
+                self.logger.info("当前配置不帮助好友除草/除虫")
             # 没有好友任务，点击X返回
             self.check_close_x_icon(game_frame)
             return False
@@ -448,8 +491,19 @@ class FarmBotCV:
         # 加入随机值机制,在目标坐标点基础上随机向四周偏移不超过3像素
         random_x_px = random.randint(-3, 3)
         random_y_px = random.randint(-3, 3)
-        pyautogui.click(screen_coord[0] + random_x_px, screen_coord[1] + random_y_px, duration=duration)
-        self.logger.debug(f"原坐标：{screen_coord}, 随机偏移：{random_x_px}, {random_y_px}, 最终点击坐标：{screen_coord[0] + random_x_px}, {screen_coord[1] + random_y_px}")
+        target_x = int(screen_coord[0] + random_x_px)
+        target_y = int(screen_coord[1] + random_y_px)
+        if self.enable_silence_click == True:
+            # 使用后台窗口控制进行点击
+            success = self.window_control.click(target_x, target_y, duration)
+            if success:
+                self.logger.debug(f"原坐标：{screen_coord}, 随机偏移：{random_x_px}, {random_y_px}, 最终点击坐标：{target_x}, {target_y}")
+            else:
+                self.logger.error(f"后台点击失败，原坐标：{screen_coord}, 随机偏移：{random_x_px}, {random_y_px}, 最终点击坐标：{target_x}, {target_y}")
+
+        else:
+            pyautogui.click(target_x, target_y, duration=duration)
+            self.logger.debug(f"原坐标：{screen_coord}, 随机偏移：{random_x_px}, {random_y_px}, 最终点击坐标：{target_x}, {target_y}")
 
     def check_help_remove_bugs(self, game_frame):
         '''
@@ -878,22 +932,35 @@ class FarmBotCV:
             self.logger.debug(f"未检测到【商店红点】, 最高置信度：{max_val:.4f} (阈值：{threshold})")
             return False
 
-    def check_daily_free(self, game_frame):
+    def check_daily_free(self):
         '''
-        检查是否有每日免费礼包
+        检查并尝试领取每日免费礼包
         '''
-        match_result, max_val, threshold = self.cv_match.match_template(game_frame, self.daily_free_frame, threshold=self.daily_free_frame_threshold)
-        if match_result is not None:        # 有每日免费礼包
-            self.logger.info(f"检测到【每日免费礼包】,准备点击, 最高置信度：{max_val:.4f} (阈值：{threshold})")
-            # 将局部坐标转换为屏幕坐标
-            screen_center = self.convert_to_screen_coordinate(match_result['center'])   # 直接点击中间即可
-            self.click_at_position(screen_center)
-            # 弹窗获得化肥礼包后,再点击一下空白处(直接点击一下免费按钮左偏50像素即可)
-            self.click_at_position(screen_center[0]-50, screen_center[1])
-            return True
-        else:
-            self.logger.debug(f"未检测到【每日免费礼包】, 最高置信度：{max_val:.4f} (阈值：{threshold})")
-            return False
+        # 直接通过游戏画面尺寸相对坐标点击商店查看(453x854->411x193)
+        shop_x_pos = self.game_frame_w * 0.907
+        shop_y_pos = self.game_frame_h * 0.225
+        # 将局部坐标转换为屏幕坐标
+        screen_center = self.convert_to_screen_coordinate((shop_x_pos,shop_y_pos))
+        self.click_at_position(screen_center)
+        time.sleep(0.5)   # 等待商店页面加载
+        # 进入商店页面后点击免费化肥按钮(453x854->128x401)
+        free_button_x_pos = self.game_frame_w * 0.282
+        free_button_y_pos = self.game_frame_h * 0.469
+        screen_center = self.convert_to_screen_coordinate((free_button_x_pos,free_button_y_pos))
+        self.click_at_position(screen_center)
+        # 点击空白处尝试关闭弹窗(453x854->225x61)
+        blank_x_pos = self.game_frame_w * 0.49
+        blank_y_pos = self.game_frame_h * 0.07
+        screen_center = self.convert_to_screen_coordinate((blank_x_pos,blank_y_pos))
+        self.click_at_position(screen_center)
+        time.sleep(0.5)   # 等待空白处点击
+        # 点击返回农场按钮(453x854->49x142)
+        return_button_x_pos = self.game_frame_w * 0.089
+        return_button_y_pos = self.game_frame_h * 0.165
+        screen_center = self.convert_to_screen_coordinate((return_button_x_pos,return_button_y_pos))
+        self.click_at_position(screen_center)
+        time.sleep(0.5)   # 等待返回农场按钮点击
+        return True
 
     def check_return_farm(self, game_frame):
         '''
@@ -910,5 +977,70 @@ class FarmBotCV:
             self.logger.debug(f"未检测到【返回农场】按钮, 最高置信度：{max_val:.4f} (阈值：{threshold})")
             return False
 
+    def plant_seed_v1(self, game_frame, now_field_idx):
+        '''
+        检查空地并尝试种植种子V1版本
+        '''
+        # 先定位到狗屋，以狗屋坐标作为基准点，使用相对坐标定位到各块地
+        match_result, max_val, threshold = self.cv_match.match_template(game_frame, self.dog_house_frame, threshold=self.dog_house_frame_threshold)
+        if match_result is not None:
+            self.logger.debug(f"检测到【狗屋】，准备定位空地并种植种子, 最高置信度：{max_val:.4f} (阈值：{threshold})")
+            dog_house_center = match_result['center']
+            dog_house_x, dog_house_y = dog_house_center[0], dog_house_center[1]
+            FIRST_FIELD_OFFSET_X = 25
+            FIRST_FIELD_OFFSET_Y = 82
+            field_offset_map = {
+                                    0:(0, 0), 1:(37,20),2:(73,38),3:(109,57),
+                                    4:(-35,20),5:(1,36),6:(37,56),7:(72,75),
+                                    8:(-71,39),9:(-39,56),10:(1,75),11:(37,93),
+                                    12:(-109,57),13:(-74,73),14:(-39,93),15:(1,111),
+                                    16:(-147,75),17:(-108,94),18:(-74,111),19:(-34,130),
+                                    20:(-181,93),21:(-146,112),22:(-109,128),23:(-75,149),
+            }
+
+            first_field_pos_x = dog_house_x + FIRST_FIELD_OFFSET_X
+            first_field_pos_y = dog_house_y + FIRST_FIELD_OFFSET_Y
+            field_offset_x, field_offset_y = field_offset_map[now_field_idx]
+            now_field_pos_x = first_field_pos_x + field_offset_x
+            now_field_pos_y = first_field_pos_y + field_offset_y
+            # 转换为屏幕坐标
+            screen_center = self.convert_to_screen_coordinate((now_field_pos_x, now_field_pos_y))
+            self.click_at_position(screen_center)
+            time.sleep(1)
+            
+            # 更新游戏画面
+            game_frame = self.screen_capture.get_window_frame()     # 获取游戏画面
+            if game_frame is None:
+                self.logger.error(f"游戏画面截取失败，请检查游戏是否开启并确保窗口在前台")
+                return True
+            
+            # 检查是否为未扩建的地
+            match_result, max_val, threshold = self.cv_match.match_template(game_frame, self.close_x_frame, threshold=self.close_x_frame_threshold)
+            if match_result is not None:
+                self.logger.info(f"检测到第{now_field_idx+1}块地为【未扩建】的地，后续土地不再巡检")
+                x_close_center = match_result['center']
+                screen_center = self.convert_to_screen_coordinate(x_close_center)
+                self.click_at_position(screen_center)
+                return False
+            else:
+                self.logger.debug(f"未检测关闭按钮, 最高置信度：{max_val:.4f} (阈值：{threshold})")
+            
+            # 检查是否可以种植种子
+            match_result, max_val, threshold = self.cv_match.match_template(game_frame, self.remove_seed_frame, threshold=self.remove_seed_frame_threshold)
+            if match_result is not None:
+                self.logger.info(f"第{now_field_idx+1}块地为【已种植】的土地")
+                return True
+            else:
+                self.logger.info(f"第{now_field_idx+1}块地为【未种植】的土地,准备播种")
+                seed_x_pos = now_field_pos_x
+                seed_y_pos = now_field_pos_y + 70
+                screen_center = self.convert_to_screen_coordinate((seed_x_pos,seed_y_pos))
+                self.click_at_position(screen_center)
+                self.logger.info(f"已尝试播种")
+                return True
+
+        else:
+            self.logger.warning(f"未检测到【狗屋】，无法定位空地并种植种子, 最高置信度：{max_val:.4f} (阈值：{threshold})")
+            return False
 
         
