@@ -1,10 +1,10 @@
 import cv2
-import keyboard
 import time
 import pyautogui
 import logging
 import configparser
 import random
+import threading
 from utils.cv_match import cvMatch
 from utils.screen_capture import ScreenCapture
 
@@ -65,6 +65,7 @@ class FarmBotCV:
         self.can_steal_small_frame_threshold = config.getfloat('threshold', 'can_steal_small_frame')
         self.can_watering_small_frame_threshold = config.getfloat('threshold', 'can_watering_small_frame')
         self.can_remove_bugs_small_frame_threshold = config.getfloat('threshold', 'can_remove_bugs_small_frame')
+        self.can_remove_grass_small_frame_threshold = config.getfloat('threshold', 'can_remove_grass_small_frame')
         self.close_x_small_frame_threshold = config.getfloat('threshold', 'close_x_small_frame')
         self.shop_red_frame_threshold = config.getfloat('threshold', 'shop_red_frame')
         self.daily_free_frame_threshold = config.getfloat('threshold', 'daily_free_frame')
@@ -80,8 +81,15 @@ class FarmBotCV:
         self.cv_match = cvMatch()
         self.is_friend_has_task = True
         self.start_friend_check_colddown_time = None
-
         
+        # 添加线程锁
+        self._pause_lock = threading.Lock()
+        
+        # 添加防抖计时器
+        self.last_pause_time = 0
+        self.last_stop_time = 0
+        self.cooldown = 1.0  # 1秒冷却时间
+
         # 加载匹配图片资源
         self.welcome_back_frame = cv2.imread(r"assert\datasets\icons\welcome_back.jpg")
         self.harvest_all_frame = cv2.imread(r"assert\datasets\icons\harvest_all.jpg")
@@ -103,6 +111,7 @@ class FarmBotCV:
         self.can_steal_small_frame = cv2.imread(r"assert\datasets\icons\can_steal_small.jpg")
         self.can_watering_small_frame = cv2.imread(r"assert\datasets\icons\can_watering_small.jpg")
         self.can_remove_bugs_small_frame = cv2.imread(r"assert\datasets\icons\can_remove_bugs.jpg")
+        self.can_remove_grass_small_frame = cv2.imread(r"assert\datasets\icons\can_remove_bugs.jpg")
         self.close_x_small_frame = cv2.imread(r"assert\datasets\icons\close_x_small.jpg")
         self.shop_red_frame = cv2.imread(r"assert\datasets\icons\shop_red.jpg")
         self.daily_free_frame = cv2.imread(r"assert\datasets\icons\daily_free.jpg")
@@ -111,34 +120,48 @@ class FarmBotCV:
         self.logger.info("机器人初始化完成,准备开始巡检")
         
     def start(self):
-        # 注册退出热键
-        keyboard.add_hotkey('ctrl+c', self.stop)
-        keyboard.add_hotkey('p', self.pause)
-
         while self.running:
             # 主循环逻辑
             if not self.pause_status:
                 self.logger.info("======================机器人正在执行一轮操作======================")
                 self.run_cycle()
                 self.logger.info(f"======================本轮操作执行完毕======================\r\n")
-            if self.debug_mode == True:
-                self.logger.debug(f"********Debug模式已开启，按[ctrl+s]键后进入下一轮操作********")
-                keyboard.wait('ctrl+s')
-            else:
-                time.sleep(self.check_interval)
             
+            # 在休眠期间定期检查是否需要停止
+            for i in range(int(self.check_interval * 10)):
+                if not self.running:
+                    break
+                time.sleep(0.1)
+
     def pause(self):
-        if self.pause_status == False:
-            self.logger.info("接收到暂停信号，机器人暂时停止处理")
-            self.pause_status = True
-        else:
-            self.logger.info("接收到恢复信号，机器人继续处理")
-            self.pause_status = False
+        # 添加防抖机制
+        current_time = time.time()
+        if current_time - self.last_pause_time < self.cooldown:
+            return
+        
+        # 使用线程锁避免重复触发
+        if self._pause_lock.acquire(blocking=False):
+            try:
+                if not self.pause_status:
+                    self.logger.info("接收到暂停信号，机器人暂时停止处理")
+                    self.pause_status = True
+                else:
+                    self.logger.info("接收到恢复信号，机器人继续处理")
+                    self.pause_status = False
+                self.last_pause_time = current_time
+            finally:
+                # 释放锁
+                self._pause_lock.release()
 
     def stop(self):
-        self.logger.info("接收到停止信号，机器人已停止退出")
+        # 添加防抖机制
+        current_time = time.time()
+        if current_time - self.last_stop_time < self.cooldown:
+            return
+        
+        self.logger.info("接收到停止信号，机器人已停止")
         self.running = False
-        exit()
+        self.last_stop_time = current_time
     
 
     def run_cycle(self):
@@ -159,6 +182,14 @@ class FarmBotCV:
                 self.logger.error(f"游戏窗口尺寸过小，请调整窗口大小,当前窗口尺寸：{game_frame_w}x{game_frame_h}，至少需满足: 400x800")
                 return
 
+            # 验证是否真正回到了自己的农场
+            # 检查是否存在好友农场特有的元素（如回家按钮），如果存在但场景被标记为home，则修正场景
+            if self.now_scene == "home":
+                # 检查是否仍然在好友农场（存在回家按钮）
+                if self.check_go_home_icon(game_frame):
+                    self.logger.warning("检测到仍在好友农场，修正场景状态")
+                    self.now_scene = "friend_farm"
+
             # 优先处理自家农场事件
             if self.now_scene == "home":
                 if self.enable_process_self:
@@ -172,12 +203,16 @@ class FarmBotCV:
                         
                 else:
                     self.logger.warning("机器人已被配置为【不处理自家农场】")
+                    # 直接切换到好友农场场景，不执行任何自家农场相关的检查
                     self.now_scene = "friend"
+                    return
             else:       # 自家地里没事干的时候尝试去偷菜
                 if self.enable_process_friend:
                     if self.is_friend_has_task == False and time.time() - self.start_friend_check_colddown_time < self.friend_colddown_time:
                         self.logger.info(f"上次检查好友农场无任务后, 冷却时间还未达到{self.friend_colddown_time}秒,当前已过去{int(time.time() - self.start_friend_check_colddown_time)}秒,本轮巡检暂不操作")
-                        self.now_scene = "home"
+                        # 验证是否真正回到了自己的农场
+                        if not self.check_go_home_icon(game_frame):
+                            self.now_scene = "home"
                         return
                     self.logger.info(f"正在检查好友农场是否有可执行的任务")
                     if self.process_friend_farm(game_frame):
@@ -185,13 +220,22 @@ class FarmBotCV:
                         return
                     else:
                         self.logger.info("好友农场已无可执行的任务，下一轮巡查将回家查看是否有可执行的任务")
-                        self.now_scene = "home"
-                        self.is_friend_has_task = False
-                        self.start_friend_check_colddown_time = time.time()   # 记录开始冷却时间
+                        # 只有当确实没有回家按钮时，才设置为home
+                        if not self.check_go_home_icon(game_frame):
+                            self.now_scene = "home"
+                            self.is_friend_has_task = False
+                            self.start_friend_check_colddown_time = time.time()   # 记录开始冷却时间
+                        else:
+                            self.logger.warning("仍在好友农场，等待下次尝试返回")
                         
                 else:
                     self.logger.warning("机器人已被配置为【不处理好友农场】")
-                    self.now_scene = "home"
+                    # 验证是否真正回到了自己的农场
+                    if not self.check_go_home_icon(game_frame):
+                        self.now_scene = "home"
+                    else:
+                        self.logger.warning("仍在好友农场，尝试返回")
+                        self.check_go_home_icon(game_frame)
 
         else:
             self.logger.warning("未找到游戏窗口，请检查游戏是否开启并确保窗口在前台")
@@ -274,12 +318,18 @@ class FarmBotCV:
                     return True
             else:
                 self.logger.info("当前配置不帮助好友浇水")
-            if self.enable_help_remove_bugs == True and self.enable_help_remove_grass == True:
+            if self.enable_help_remove_bugs == True:
                 if self.check_can_remove_bugs_small(game_frame):
                     self.now_scene = "friend_farm"
                     return True
             else:
-                self.logger.info("当前配置不帮助好友除虫/除草")
+                self.logger.info("当前配置不帮助好友除虫")
+            if self.enable_help_remove_grass == True:
+                if self.check_can_remove_grass_small(game_frame):
+                    self.now_scene = "friend_farm"
+                    return True
+            else:
+                self.logger.info("当前配置不帮助好友除草")
             if self.check_close_x_small(game_frame):    # 好友来农场的弹窗需要关掉
                 self.now_scene = "home"
                 return True
@@ -357,7 +407,9 @@ class FarmBotCV:
                 self.logger.info("当前配置不帮助好友除虫")
             # 以上都没有则回家
             if self.check_go_home_icon(game_frame):
-                self.now_scene = "home"
+                # 点击回家按钮后，不立即设置为home，等待下次循环验证是否真正返回
+                # 增加延迟，确保页面有时间响应
+                time.sleep(1.5)
                 return True
         else:
             self.logger.error("scene error")
@@ -773,6 +825,23 @@ class FarmBotCV:
             return True
         else:
             self.logger.debug(f"未检测到【好友可除虫】的标志, 最高置信度：{max_val:.4f} (阈值：{threshold})")
+            return False
+    
+    def check_can_remove_grass_small(self, game_frame):
+        '''
+        检查好友按钮上方是否有可除草的标志
+        Returns:
+            bool: 是否有可除草的标志
+        '''
+        match_result, max_val, threshold = self.cv_match.match_template(game_frame, self.can_remove_grass_small_frame, threshold=self.can_remove_grass_small_frame_threshold)
+        if match_result is not None:        # 有可除草的标志
+            self.logger.info(f"检测到【好友可除草】的标志,准备点击, 最高置信度：{max_val:.4f} (阈值：{threshold})")
+            # 将局部坐标转换为屏幕坐标
+            screen_center = self.convert_to_screen_coordinate(match_result['center'])   # 直接点击中间即可
+            self.click_at_position(screen_center)
+            return True
+        else:
+            self.logger.debug(f"未检测到【好友可除草】的标志, 最高置信度：{max_val:.4f} (阈值：{threshold})")
             return False
 
     def check_close_x_small(self, game_frame):

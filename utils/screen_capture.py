@@ -57,8 +57,19 @@ class ScreenCapture:
             if self.camera is not None:
                 # 释放旧的 camera
                 del self.camera
-            self.camera = dxcam.create(output_idx=target_idx)
-            self.current_monitor_idx = target_idx
+            # 直接创建dxcam实例，即使在非主线程中会报信号处理器错误
+            # 这个错误不会影响dxcam的正常功能
+            import signal
+            # 保存原始的signal.signal函数
+            original_signal = signal.signal
+            try:
+                # 临时替换signal.signal函数，避免安装信号处理器
+                signal.signal = lambda *args, **kwargs: None
+                self.camera = dxcam.create(output_idx=target_idx)
+                self.current_monitor_idx = target_idx
+            finally:
+                # 恢复原始的signal.signal函数
+                signal.signal = original_signal
         
         
         region_relative = (
